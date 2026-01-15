@@ -405,7 +405,7 @@ Future enhancements planned:
 
 ## License
 
-MIT License - Copyright (c) 2026 Alisher Sultanov
+MIT License - Copyright (c) 2026 
 
 See [LICENSE](LICENSE) file for full details.
 
