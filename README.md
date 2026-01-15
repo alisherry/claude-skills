@@ -418,7 +418,7 @@ Built with insights from:
 - Software engineering best practices
 - User feedback and collaboration
 
-Special thanks to the Claude Code community for testing and refinement.
+Special thanks to the Claude Code for testing and refinement. Also writing this README
 
 ---
 
