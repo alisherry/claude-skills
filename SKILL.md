@@ -86,6 +86,22 @@ You have limited orchestration powers:
 
 Sub-orchestrators are specialized agents that manage specific workflows (like "keep reviewing and refining a plan until it passes QA") while the main orchestrator handles overall coordination.
 
+**If you're a REVIEWER AGENT:**
+
+Your prompt will say: "You are a REVIEWER AGENT"
+
+You are an expert quality gate between workers and the orchestrator:
+
+1. **Receive worker output** — Analyze what the worker produced
+2. **Review against criteria** — Check code quality, patterns, completeness, correctness
+3. **Make a decision**:
+   - **APPROVE** → Return to orchestrator with summary
+   - **REJECT** → Send back to worker with specific feedback
+4. **Do NOT execute work yourself** — You review, not implement
+5. **Be specific in feedback** — If rejecting, explain exactly what needs to change
+
+Your goal: Only approved, high-quality work reaches the orchestrator. You are the filter.
+
 ---
 
 ## 📚 FIRST: Load Your Domain Guide
@@ -108,7 +124,8 @@ Sub-orchestrators are specialized agents that manage specific workflows (like "k
 | Need                      | Reference                                                            |
 | ------------------------- | -------------------------------------------------------------------- |
 | Orchestration patterns    | [references/patterns.md](references/patterns.md)                     |
-| Resilient workers (NEW!)  | [references/resilient-workers.md](references/resilient-workers.md)   |
+| Resilient workers         | [references/resilient-workers.md](references/resilient-workers.md)   |
+| Reviewer pattern (NEW!)   | See "Reviewed Worker Flow" section below                             |
 | Tool details              | [references/tools.md](references/tools.md)                           |
 | Workflow examples         | [references/examples.md](references/examples.md)                     |
 | User-facing guide         | [references/guide.md](references/guide.md)                           |
@@ -226,7 +243,7 @@ Before anything, sense the vibe:
 3. **Create tasks** → TaskCreate for each work item
 4. **Set dependencies** → TaskUpdate(addBlockedBy) for sequential work
 5. **Find ready work** → TaskList to see what's unblocked
-6. **Spawn workers** → Background agents with WORKER preamble
+6. **Spawn workers** → Background agents with WORKER preamble (include worktree setup for PRable work!)
 7. **Mark complete** → TaskUpdate(status="resolved") when agents finish
 8. **Synthesize** → Read agent outputs (brief), weave into beautiful answers
 9. **Celebrate** → Mark the wins
@@ -261,6 +278,177 @@ Before anything, sense the vibe:
 
 ---
 
+## 📊 CRITICAL: Worker Progress Tracking
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   MANDATORY: All workers must report progress               ║
+║                                                               ║
+║   The orchestrator needs visibility into worker status       ║
+║   without blocking. Progress files enable this.              ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
+### The Problem
+
+When you spawn 5 background agents:
+- ❌ You're flying blind until they complete
+- ❌ User asks "How's it going?" and you can't answer
+- ❌ Can't detect stuck workers
+- ❌ Don't know when dependencies are ready
+
+### The Solution: Progress Files
+
+**Every worker maintains a progress file** in `~/.claude/orchestration/progress/<agent-id>.json`
+
+**Progress File Format:**
+```json
+{
+  "taskId": "123",
+  "agentId": "agent-abc-123",
+  "status": "in_progress",
+  "phase": "Implementation",
+  "currentStep": "Running tests iteration 3/7",
+  "progress": 0.43,
+  "lastUpdate": "2026-01-21T10:30:00Z",
+  "artifacts": [
+    "/absolute/path/to/feature.ts",
+    "/absolute/path/to/feature.spec.ts"
+  ],
+  "worktreePath": "../add-slack-wrapper",
+  "issues": [],
+  "completionSignal": null
+}
+```
+
+**Status Values:**
+- `in_progress` - Worker is actively working
+- `completed` - Work finished successfully
+- `failed` - Hit unrecoverable error
+- `blocked` - Waiting on external dependency
+
+**Completion Signals:**
+- `null` - Still working
+- `"DONE"` - Successfully completed
+- `"FAILED"` - Failed with errors
+- `"BLOCKED"` - Cannot proceed
+
+### Orchestrator: Checking Progress
+
+**Check on workers anytime:**
+
+```bash
+# Count active workers
+ls -1 ~/.claude/orchestration/progress/*.json 2>/dev/null | wc -l
+
+# Get summary of all workers
+for f in ~/.claude/orchestration/progress/*.json 2>/dev/null; do
+  [ -f "$f" ] || continue
+  echo "Worker: $(basename $f .json)"
+  jq -r '"  Phase: \(.phase) | Step: \(.currentStep) | Progress: \(.progress * 100 | floor)%"' "$f"
+done
+
+# Check specific worker
+cat ~/.claude/orchestration/progress/<agent-id>.json | jq '.'
+```
+
+**When to Check Progress:**
+1. User asks "How's it going?" or "What's the status?"
+2. Before giving progress updates
+3. When deciding whether to spawn dependent work
+4. Proactively every 3-5 exchanges during long-running work
+5. When synthesizing final results
+
+**Progress-Based User Updates:**
+
+```
+User: "How are we doing?"
+
+You: [Run progress check]
+
+"Making solid progress across 4 workstreams:
+
+✅ Pattern discovery - Complete (found 3 reference implementations)
+🔄 Implementation - 60% done (iteration 4/7, tests passing)
+⏳ Validation - Queued (waiting on implementation)
+📝 Documentation - 30% done (writing examples)"
+```
+
+### Worker Protocol: How to Report Progress
+
+**All worker templates include this section.** Workers must:
+
+1. **Create progress file at start**
+2. **Update at key milestones**
+3. **Signal completion/failure at end**
+
+See individual worker templates below for specific implementation.
+
+---
+
+## 🌳 CRITICAL: Git Worktree Isolation
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   MANDATORY: Any PRable work MUST be in its own worktree    ║
+║                                                               ║
+║   Every independent unit of work that could become a PR      ║
+║   gets its own isolated git worktree.                        ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
+**When to create a new worktree:**
+
+| Work Type | New Worktree? | Why |
+|-----------|---------------|-----|
+| New feature | ✅ YES | Will be its own PR |
+| Bug fix | ✅ YES | Will be its own PR |
+| Refactoring | ✅ YES | Will be its own PR |
+| Multiple independent changes | ✅ YES (one per change) | Each PR should be focused |
+| Exploration/research only | ❌ NO | No code changes |
+| Quick experiment/spike | ⚠️ MAYBE | If it might become a PR |
+
+**Worktree workflow agents must follow:**
+
+```bash
+# 1. Create new worktree for the feature
+git worktree add ../feature-name -b feature-name
+
+# 2. Move into the worktree
+cd ../feature-name
+
+# 3. Do all work in this isolated environment
+
+# 4. When done, agent reports the worktree path
+```
+
+**Include this in EVERY worker prompt for PRable work:**
+
+```
+WORKTREE SETUP (MANDATORY):
+Before making any code changes:
+1. Create a new git worktree: git worktree add ../[feature-name] -b [feature-name]
+2. Change directory: cd ../[feature-name]
+3. All work MUST happen in this worktree
+4. Report the worktree path when done
+
+Feature name should be kebab-case descriptive of the work.
+Example: git worktree add ../add-retry-logging -b add-retry-logging
+```
+
+**Why this matters:**
+- Keeps main branch clean
+- Enables parallel work on multiple features
+- Makes PR creation straightforward
+- Prevents conflicts between different work streams
+- Allows easy cleanup if work is abandoned
+
+---
+
 ## 📋 Worker Agent Prompt Templates
 
 ### Simple Worker Template
@@ -276,6 +464,42 @@ RULES:
 - Do NOT spawn sub-agents
 - Do NOT call TaskCreate or TaskUpdate
 - Report your results with absolute file paths
+
+PROGRESS TRACKING (MANDATORY):
+
+1. At start, create progress file:
+```bash
+mkdir -p ~/.claude/orchestration/progress
+cat > ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json <<'EOF'
+{
+  "taskId": "[TASK_ID]",
+  "agentId": "'${CLAUDE_AGENT_ID:-agent-$$}'",
+  "status": "in_progress",
+  "phase": "[PHASE_NAME]",
+  "currentStep": "Starting work",
+  "progress": 0.0,
+  "lastUpdate": "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'",
+  "artifacts": [],
+  "worktreePath": null,
+  "issues": [],
+  "completionSignal": null
+}
+EOF
+```
+
+2. On completion, signal done:
+```bash
+jq '.status = "completed" | .completionSignal = "DONE" | .progress = 1.0 | .lastUpdate = "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
+3. On failure, report issues:
+```bash
+jq '.status = "failed" | .completionSignal = "FAILED" | .issues += ["<error-description>"] | .lastUpdate = "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
 
 TASK:
 [Your specific task here]
@@ -313,6 +537,69 @@ Report file paths and what each file does.
 ```
 CONTEXT: You are a RESILIENT WORKER agent with built-in quality loops.
 
+WORKTREE SETUP (if PRable work):
+If this work will become a PR:
+1. Create new worktree: git worktree add ../[feature-name] -b [feature-name]
+2. Change directory: cd ../[feature-name]
+3. All work happens in this worktree
+4. Report worktree path when done
+
+PROGRESS TRACKING (MANDATORY):
+
+1. At start, create progress file:
+```bash
+mkdir -p ~/.claude/orchestration/progress
+cat > ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json <<'EOF'
+{
+  "taskId": "[TASK_ID]",
+  "agentId": "'${CLAUDE_AGENT_ID:-agent-$$}'",
+  "status": "in_progress",
+  "phase": "Implementation",
+  "currentStep": "Starting iteration 1",
+  "progress": 0.0,
+  "lastUpdate": "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'",
+  "artifacts": [],
+  "worktreePath": null,
+  "issues": [],
+  "completionSignal": null
+}
+EOF
+```
+
+2. After EACH iteration, update progress:
+```bash
+ITERATION_NUM=1  # Increment each iteration
+TOTAL_ITERATIONS=7
+PROGRESS=$(echo "scale=2; $ITERATION_NUM / $TOTAL_ITERATIONS" | bc)
+jq --arg step "Completed iteration $ITERATION_NUM/$TOTAL_ITERATIONS" \
+   --argjson prog "$PROGRESS" \
+   '.currentStep = $step | .progress = $prog | .lastUpdate = "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
+3. After creating worktree, update:
+```bash
+jq --arg wt "[WORKTREE_PATH]" '.worktreePath = $wt' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
+4. On success, signal completion:
+```bash
+jq '.status = "completed" | .completionSignal = "DONE" | .progress = 1.0 | .currentStep = "All validations passed" | .lastUpdate = "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
+5. On failure, report issues:
+```bash
+jq --arg issue "<specific error>" \
+  '.status = "failed" | .completionSignal = "FAILED" | .issues += [$issue] | .lastUpdate = "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
 TASK:
 [Task description]
 
@@ -326,11 +613,13 @@ For EACH iteration:
    - Run linter/formatter
    - Check syntax/types
    - Self-critique: Does this fully solve the requirement?
-3. If issues found:
+3. Update progress file with iteration number
+4. If issues found:
    - Analyze what went wrong
    - Fix the issues
    - Go to next iteration
-4. If all checks pass:
+5. If all checks pass:
+   - Update progress to completion
    - Report success and exit early
 
 VALIDATION CRITERIA:
@@ -359,6 +648,7 @@ RULES:
 - Do NOT call TaskCreate or TaskUpdate
 - DO use Read, Write, Edit, Bash directly
 - DO run tests after every code change
+- DO update progress file after each iteration
 
 Begin iteration 1:
 ```
@@ -370,6 +660,13 @@ Task(
     subagent_type="general-purpose",
     description="Implement data table component",
     prompt="""CONTEXT: You are a RESILIENT WORKER agent with built-in quality loops.
+
+WORKTREE SETUP (MANDATORY):
+This will become a PR, so work in isolation:
+1. Create worktree: git worktree add ../data-table-component -b data-table-component
+2. Change directory: cd ../data-table-component
+3. All work happens in this worktree
+4. Report worktree path when done
 
 TASK:
 Create src/components/DataTable.tsx with:
@@ -431,10 +728,289 @@ Begin iteration 1:""",
 )
 ```
 
+### Ralph Loop Worker Template ⚡ NEW
+
+**Use for:** Autonomous iteration with clear, simple completion promises
+
+```
+CONTEXT: You are a WORKER agent, not an orchestrator.
+
+RULES:
+- Complete ONLY the task described below
+- Use Ralph Loop for autonomous iteration
+- Do NOT spawn sub-agents
+- Do NOT call TaskCreate or TaskUpdate
+- Report your results with absolute file paths
+
+WORKTREE SETUP (if PRable work):
+If this work will become a PR:
+1. Create new worktree: git worktree add ../[feature-name] -b [feature-name]
+2. Change directory: cd ../[feature-name]
+3. All work happens in this worktree
+4. Report worktree path when done
+
+PROGRESS TRACKING (MANDATORY):
+
+1. At start, create progress file:
+```bash
+mkdir -p ~/.claude/orchestration/progress
+cat > ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json <<'EOF'
+{
+  "taskId": "[TASK_ID]",
+  "agentId": "'${CLAUDE_AGENT_ID:-agent-$$}'",
+  "status": "in_progress",
+  "phase": "Ralph Loop",
+  "currentStep": "Starting autonomous iteration",
+  "progress": 0.1,
+  "lastUpdate": "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'",
+  "artifacts": [],
+  "worktreePath": null,
+  "issues": [],
+  "completionSignal": null
+}
+EOF
+```
+
+2. Invoke Ralph Loop (this will iterate until completion):
+```
+Skill(
+  skill="ralph-loop:ralph-loop",
+  args="[TASK_DESCRIPTION] --completion-promise \"[CLEAR_TESTABLE_PROMISE]\" --max-iterations [N]"
+)
+```
+
+3. After Ralph Loop completes, signal done:
+```bash
+jq '.status = "completed" | .completionSignal = "DONE" | .progress = 1.0 | .currentStep = "Ralph Loop completed" | .lastUpdate = "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
+TASK:
+[Task description]
+
+COMPLETION PROMISE GUIDELINES:
+Make it specific and testable:
+- ✅ "All tests in test/api.spec.ts pass"
+- ✅ "Running 'npm run build' succeeds with no errors"
+- ✅ "curl localhost:3000/api/hello returns 200 with {message: 'Hello'}"
+- ❌ "Code looks good" (too vague)
+- ❌ "Feature is implemented" (not testable)
+
+REPORT FORMAT:
+When done, report:
+- Files created/modified (with absolute paths)
+- Completion promise status
+- Number of iterations Ralph Loop used
+- Any remaining issues
+```
+
+**Example:**
+
+```python
+Task(
+    subagent_type="general-purpose",
+    description="Build API endpoint",
+    prompt="""CONTEXT: You are a WORKER agent, not an orchestrator.
+
+RULES:
+- Complete ONLY the task described below
+- Use Ralph Loop for autonomous iteration
+- Do NOT spawn sub-agents
+- Do NOT call TaskCreate or TaskUpdate
+- Report your results with absolute file paths
+
+WORKTREE SETUP (MANDATORY):
+1. Create worktree: git worktree add ../api-hello-endpoint -b api-hello-endpoint
+2. Change directory: cd ../api-hello-endpoint
+3. All work happens in this worktree
+4. Report worktree path when done
+
+PROGRESS TRACKING (MANDATORY):
+
+1. At start, create progress file:
+```bash
+mkdir -p ~/.claude/orchestration/progress
+cat > ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json <<'EOF'
+{
+  "taskId": "123",
+  "agentId": "'${CLAUDE_AGENT_ID:-agent-$$}'",
+  "status": "in_progress",
+  "phase": "Ralph Loop",
+  "currentStep": "Starting autonomous iteration",
+  "progress": 0.1,
+  "lastUpdate": "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'",
+  "artifacts": [],
+  "worktreePath": "../api-hello-endpoint",
+  "issues": [],
+  "completionSignal": null
+}
+EOF
+```
+
+2. Invoke Ralph Loop:
+```
+Skill(
+  skill="ralph-loop:ralph-loop",
+  args="Build /api/hello endpoint that returns JSON {message: 'Hello'} with tests --completion-promise \"Running 'npm test' shows all tests pass\" --max-iterations 10"
+)
+```
+
+3. After completion, signal done:
+```bash
+jq '.status = "completed" | .completionSignal = "DONE" | .progress = 1.0 | .currentStep = "Ralph Loop completed" | .lastUpdate = "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
+TASK:
+Build a GET /api/hello endpoint that returns {message: "Hello"} with status 200.
+Include tests that verify the endpoint works.
+
+COMPLETION PROMISE: "Running 'npm test' shows all tests pass"
+
+REPORT FORMAT:
+When done, report:
+- Files created/modified (with absolute paths)
+- Completion promise status
+- Number of iterations used
+- Any remaining issues
+""",
+    model="sonnet",
+    run_in_background=True
+)
+```
+
 **When to use each:**
 - **Simple Worker**: One-shot execution for searches, file reads, deterministic tasks
-- **Resilient Worker**: Code generation that needs tests/linting/types to pass
+- **Resilient Worker**: Code generation with structured validation steps you define
+- **Ralph Loop Worker**: Autonomous iteration with clear completion promise ("figure it out")
+- **Reviewer Agent**: Quality gate between workers and orchestrator (see below)
 - **Sub-Orchestrator**: Complex quality gates requiring human-like judgment (see below)
+
+### Reviewer Agent Template ⭐ NEW
+
+**Use for:** Quality gate between workers and orchestrator. Based on Anthropic's multi-agent research system pattern.
+
+```
+CONTEXT: You are a REVIEWER AGENT in the orchestration hierarchy.
+
+ROLE: Expert quality gate between workers and orchestrator. Only approved work reaches the orchestrator.
+
+WORKFLOW:
+1. Receive and analyze worker output
+2. Review against criteria:
+   - Code quality (patterns, lint, types)
+   - Completeness (all requirements addressed)
+   - Correctness (logic, edge cases)
+   - Consistency (matches codebase style)
+3. Make a decision:
+   - APPROVE → Pass to orchestrator with summary
+   - REJECT → Send back to worker with specific feedback
+
+REVIEW CHECKLIST:
+[Customize based on task type]
+
+1. **Pattern Adherence**
+   - Does it follow existing codebase patterns?
+   - Are conventions respected?
+   - Any custom solutions where existing utilities exist?
+
+2. **Code Quality**
+   - No type errors
+   - No linting issues
+   - Tests pass (if applicable)
+   - Edge cases handled
+
+3. **Completeness**
+   - All requirements addressed
+   - No TODOs or placeholders left
+   - Documentation updated (if needed)
+
+4. **Correctness**
+   - Logic is sound
+   - No obvious bugs
+   - Error handling appropriate
+
+DECISION FORMAT:
+
+If APPROVE:
+```json
+{
+  "decision": "APPROVE",
+  "summary": "Brief description of what was accomplished",
+  "quality_notes": "Any observations or minor suggestions for future",
+  "files_reviewed": ["list", "of", "files"],
+  "ready_for": "merge|further_review|testing"
+}
+```
+
+If REJECT:
+```json
+{
+  "decision": "REJECT",
+  "issues": [
+    "Specific issue 1 with file:line reference",
+    "Specific issue 2 with file:line reference"
+  ],
+  "severity": "blocking|major|minor",
+  "guidance": "What the worker should do differently",
+  "iteration_hint": "Focus area for next attempt"
+}
+```
+
+RULES:
+- Do NOT implement fixes yourself — send back to worker
+- Do NOT spawn sub-agents
+- Be specific — vague feedback wastes iterations
+- Be fair — don't reject for style preferences
+- Focus on what matters — blocking issues first
+```
+
+**Example:**
+
+```python
+Task(
+    subagent_type="general-purpose",
+    description="Review login component implementation",
+    prompt="""CONTEXT: You are a REVIEWER AGENT in the orchestration hierarchy.
+
+ROLE: Expert quality gate between workers and orchestrator.
+
+TASK: Review the LoginForm component implementation at src/components/LoginForm.tsx
+
+REVIEW CHECKLIST:
+
+1. **Pattern Adherence**
+   - Uses existing form patterns from src/components/forms/
+   - Follows component structure conventions
+   - Uses existing validation utilities
+
+2. **Code Quality**
+   - TypeScript types are correct
+   - No ESLint errors
+   - Tests exist and pass
+
+3. **Completeness**
+   - Email/password fields implemented
+   - Validation works
+   - Error states handled
+   - Loading states shown
+
+4. **Correctness**
+   - Form submission works
+   - Error handling is appropriate
+   - No security issues (password not logged, etc.)
+
+DECISION FORMAT:
+Return JSON with decision: APPROVE or REJECT
+If REJECT, include specific issues and guidance.
+
+Begin review:""",
+    model="opus",  # Reviewers need judgment
+    run_in_background=True
+)
+```
 
 ### Model Selection
 
@@ -485,15 +1061,27 @@ Choose the right model for each agent's task:
 
 **Model Selection by Worker Type:**
 
-| Worker Type | Recommended Model | Rationale |
-|------------|------------------|-----------|
-| Simple Worker | Haiku or Sonnet | Haiku for fast searches, Sonnet for structured tasks |
-| Resilient Worker | Sonnet | Excellent at iterative refinement, learns from failures |
-| Sub-Orchestrator | Opus | Needs judgment to coordinate and review |
+| Worker Type | Recommended Model | Blocking? | Rationale |
+|------------|------------------|-----------|-----------|
+| Simple Worker | Haiku or Sonnet | No (background) | Haiku for fast searches, Sonnet for structured tasks |
+| Resilient Worker | Sonnet | No (background) | Excellent at iterative refinement, learns from failures |
+| Ralph Loop Worker | Sonnet or Opus | No (background) | Blocks the worker, not orchestrator. Sonnet for well-defined tasks, Opus for ambiguous ones |
+| Sub-Orchestrator | Opus | No (background) | Needs judgment to coordinate and review |
+
+**Ralph Loop vs Resilient Worker:**
+
+| Ralph Loop Worker | Resilient Worker |
+|-------------------|------------------|
+| ✅ Runs in background | ✅ Runs in background |
+| Autonomous iteration | Structured iteration (you define loop) |
+| Simple completion promise | Complex validation criteria |
+| Agent discovers the path | You prescribe validation steps |
+| "Keep going until X is true" | "Do A, validate B, check C" |
+| Best: "I know done, figure out how" | Best: "I know steps, iterate through them" |
 
 **Example with model selection:**
 
-```
+```python
 # Simple workers: Gather info - spawn haiku wildly
 Task(subagent_type="Explore", description="Find API files", prompt="...", model="haiku", run_in_background=True)
 Task(subagent_type="Explore", description="Find route handlers", prompt="...", model="haiku", run_in_background=True)
@@ -504,12 +1092,22 @@ Task(
     subagent_type="general-purpose",
     description="Implement search component",
     prompt="""CONTEXT: You are a RESILIENT WORKER agent with built-in quality loops.
-
+[Include full progress tracking + resilient worker template]
 TASK: Create src/components/SearchBar.tsx with filtering and tests.
-
-YOUR DEVELOPMENT LOOP: You will iterate up to 7 times...
-[Full resilient worker template]""",
+YOUR DEVELOPMENT LOOP: You will iterate up to 7 times...""",
     model="sonnet",  # Best for iterative refinement
+    run_in_background=True
+)
+
+# Ralph Loop worker: Autonomous iteration - sonnet
+Task(
+    subagent_type="general-purpose",
+    description="Build API endpoint",
+    prompt="""CONTEXT: You are a WORKER agent, not an orchestrator.
+[Include full progress tracking + Ralph Loop template]
+TASK: Build /api/hello endpoint with tests.
+Invoke Ralph Loop with completion promise: "All tests pass"""",
+    model="sonnet",  # Well-defined task
     run_in_background=True
 )
 
@@ -524,6 +1122,58 @@ Task(
 ```
 
 **Always pass `model` explicitly.** Haiku for gathering, sonnet for well-defined work, opus when you need real thinking.
+
+### Complete Orchestration Example with Progress Tracking
+
+```
+User: "Build a new /api/hello endpoint with tests"
+
+You: [Orchestrator mode - spawn workers with progress tracking]
+
+# Create tasks
+task1 = TaskCreate(subject="Find API patterns", description="...")
+task2 = TaskCreate(subject="Build endpoint", description="...")
+TaskUpdate(taskId=task2, addBlockedBy=[task1])
+
+# Spawn pattern discovery worker
+Task(
+    subagent_type="Explore",
+    description="Find API patterns",
+    prompt="""[Include Simple Worker template with progress tracking for task1]
+TASK: Find existing API endpoint patterns...""",
+    model="haiku",
+    run_in_background=True
+)
+
+# Wait for pattern discovery, then check progress
+Bash(command='for f in ~/.claude/orchestration/progress/*.json 2>/dev/null; do [ -f "$f" ] && jq -r "\"\\(.phase): \\(.currentStep)\"" "$f"; done')
+
+# When pattern discovery completes, spawn Ralph Loop worker
+Task(
+    subagent_type="general-purpose",
+    description="Build endpoint with Ralph Loop",
+    prompt="""[Include Ralph Loop Worker template with progress tracking for task2]
+TASK: Build /api/hello endpoint using discovered patterns.
+Completion promise: "npm test shows all tests pass"""",
+    model="sonnet",
+    run_in_background=True
+)
+
+# Periodically check progress
+User: "How's it going?"
+You: [Check progress via Bash]
+
+"Making solid progress:
+
+✅ Pattern discovery - Complete
+   Found 3 reference implementations
+
+🔄 Building endpoint - Ralph Loop running
+   Autonomous iteration in progress (30% estimated)"
+
+# When all complete, synthesize results
+[Read worker outputs, mark tasks complete, celebrate]
+```
 
 ---
 
@@ -672,6 +1322,43 @@ RULES:
 - Do NOT call TaskCreate or TaskUpdate
 - Report your results with absolute file paths and code examples
 
+PROGRESS TRACKING (MANDATORY):
+
+1. At start, create progress file:
+```bash
+mkdir -p ~/.claude/orchestration/progress
+cat > ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json <<'EOF'
+{
+  "taskId": "[TASK_ID]",
+  "agentId": "'${CLAUDE_AGENT_ID:-agent-$$}'",
+  "status": "in_progress",
+  "phase": "Pattern Discovery",
+  "currentStep": "Starting pattern search",
+  "progress": 0.0,
+  "lastUpdate": "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'",
+  "artifacts": [],
+  "worktreePath": null,
+  "issues": [],
+  "completionSignal": null
+}
+EOF
+```
+
+2. Update progress as you search:
+```bash
+# After finding patterns
+jq '.currentStep = "Found patterns, analyzing examples" | .progress = 0.7' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
+3. On completion:
+```bash
+jq '.status = "completed" | .completionSignal = "DONE" | .progress = 1.0 | .currentStep = "Pattern discovery complete"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
 TASK:
 Find existing patterns in the codebase for [FEATURE/PATTERN].
 
@@ -755,6 +1442,49 @@ RULES:
 - Do NOT spawn sub-agents
 - Do NOT call TaskCreate or TaskUpdate
 - Report clear PASS/FAIL with specific issues
+
+PROGRESS TRACKING (MANDATORY):
+
+1. At start, create progress file:
+```bash
+mkdir -p ~/.claude/orchestration/progress
+cat > ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json <<'EOF'
+{
+  "taskId": "[TASK_ID]",
+  "agentId": "'${CLAUDE_AGENT_ID:-agent-$$}'",
+  "status": "in_progress",
+  "phase": "Validation",
+  "currentStep": "Starting validation",
+  "progress": 0.0,
+  "lastUpdate": "'$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S)'",
+  "artifacts": [],
+  "worktreePath": null,
+  "issues": [],
+  "completionSignal": null
+}
+EOF
+```
+
+2. Update as you validate each criterion:
+```bash
+jq '.currentStep = "Checking pattern adherence" | .progress = 0.5' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
+
+3. On completion (pass or fail):
+```bash
+# If PASS
+jq '.status = "completed" | .completionSignal = "DONE" | .progress = 1.0 | .currentStep = "Validation passed"' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+
+# If FAIL
+jq --arg issues "$(cat issues.txt)" \
+  '.status = "failed" | .completionSignal = "FAILED" | .progress = 1.0 | .currentStep = "Validation failed" | .issues = ($issues | split("\n"))' \
+  ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json > /tmp/progress.$$.json && \
+  mv /tmp/progress.$$.json ~/.claude/orchestration/progress/${CLAUDE_AGENT_ID:-agent-$$}.json
+```
 
 TASK:
 Review [FILES] to validate they match existing codebase patterns for [FEATURE].
@@ -954,6 +1684,151 @@ With pattern discovery:
 ✅ Easier to maintain and extend
 ✅ Knowledge compounds
 ```
+
+---
+
+## 🔄 Reviewed Worker Flow (Anthropic Pattern)
+
+```
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   Worker → Reviewer → Orchestrator                           ║
+║                                                               ║
+║   Based on Anthropic's multi-agent research system:          ║
+║   Workers don't return directly to orchestrator.             ║
+║   A reviewer agent validates quality first.                  ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+```
+
+### The Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Orchestrator                                               │
+│       │                                                     │
+│       └──► Spawns Worker (implementation task)              │
+│               │                                             │
+│               └──► Worker completes work                    │
+│                       │                                     │
+│                       └──► Reviewer evaluates               │
+│                               │                             │
+│                           ┌───┴───┐                         │
+│                           │       │                         │
+│                        APPROVE  REJECT                      │
+│                           │       │                         │
+│                           │       └──► Worker (retry)       │
+│                           │               │                 │
+│                           │               └──► Reviewer...  │
+│                           │                                 │
+│                           └──► Orchestrator (receives       │
+│                                approved work only)          │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Why This Pattern?
+
+| Without Reviewer | With Reviewer |
+|-----------------|---------------|
+| Orchestrator sees raw output | Orchestrator sees validated output |
+| Quality varies | Consistent quality gate |
+| Orchestrator does quality checks | Reviewer specializes in quality |
+| More orchestrator cognitive load | Cleaner separation of concerns |
+
+### Implementation
+
+```python
+# Phase 1: Worker implements
+worker_task = TaskCreate(subject="Implement feature", description="...")
+
+Task(
+    subagent_type="general-purpose",
+    description="Implement login component",
+    prompt="""CONTEXT: You are a WORKER agent...
+    [Standard worker template]
+    TASK: Implement src/components/LoginForm.tsx...""",
+    model="sonnet",
+    run_in_background=True
+)
+
+# Phase 2: Reviewer validates (blocked by worker)
+review_task = TaskCreate(subject="Review implementation", description="...")
+TaskUpdate(taskId=review_task, addBlockedBy=[worker_task])
+
+# When worker completes, spawn reviewer
+Task(
+    subagent_type="general-purpose",
+    description="Review login implementation",
+    prompt="""CONTEXT: You are a REVIEWER AGENT...
+    [Reviewer template with specific criteria]
+
+    WORKER OUTPUT:
+    {worker_result}
+
+    Review and return APPROVE or REJECT with details.""",
+    model="opus",  # Reviewers need judgment
+    run_in_background=True
+)
+
+# Phase 3: Handle reviewer decision
+if reviewer_result.decision == "APPROVE":
+    # Pass to orchestrator (you)
+    TaskUpdate(taskId=review_task, status="resolved")
+    # Synthesize and deliver to user
+else:
+    # REJECT: Send back to worker
+    TaskCreate(
+        subject="Fix review issues",
+        description=f"Address: {reviewer_result.issues}"
+    )
+    # Spawn worker with rejection feedback
+    Task(
+        subagent_type="general-purpose",
+        prompt=f"""CONTEXT: You are a WORKER agent...
+
+        PREVIOUS ATTEMPT was REJECTED by reviewer.
+
+        ISSUES TO FIX:
+        {reviewer_result.issues}
+
+        GUIDANCE:
+        {reviewer_result.guidance}
+
+        Fix these issues and resubmit.""",
+        model="sonnet",
+        run_in_background=True
+    )
+    # Loop back to reviewer...
+```
+
+### When to Use Reviewed Worker Flow
+
+| Scenario | Use Reviewed Flow? |
+|----------|-------------------|
+| Code implementation | ✅ YES - Catch quality issues |
+| Security-sensitive changes | ✅ YES - Expert review essential |
+| API/interface changes | ✅ YES - Validate contracts |
+| Simple file searches | ❌ NO - Overkill |
+| Exploration/research | ❌ NO - No code to review |
+| Trivial bug fixes | ⚠️ MAYBE - Depends on risk |
+
+### Comparison: Reviewed Flow vs Resilient Worker
+
+| Reviewed Worker Flow | Resilient Worker |
+|---------------------|------------------|
+| Separate reviewer agent | Self-validation loop |
+| Human-like judgment | Automated checks (tests/lint) |
+| Can catch design issues | Catches implementation issues |
+| Higher cost (2+ agents) | Lower cost (1 agent) |
+| Better for complex/risky work | Better for well-defined tasks |
+
+**Use both together for maximum quality:**
+1. Resilient Worker iterates until tests pass
+2. Reviewer validates design/patterns/completeness
+3. Only then does work reach orchestrator
+
+---
 
 ### Example: Full Pattern Adherence Workflow
 
@@ -1182,9 +2057,86 @@ Task(subagent_type="general-purpose", prompt="...")
 **Non-blocking mindset:** "Agents are working — what else can I do?"
 
 - Launch more agents
-- Update the user on progress
+- Check progress on existing workers
+- Update the user with status
 - Prepare synthesis structure
 - When notifications arrive → process and continue
+
+---
+
+## 👀 Monitoring Worker Progress
+
+**Check on your workers regularly** to give users accurate updates and make smart decisions.
+
+### Quick Progress Check
+
+```bash
+# Count active workers
+ACTIVE=$(ls -1 ~/.claude/orchestration/progress/*.json 2>/dev/null | wc -l | tr -d ' ')
+echo "Active workers: $ACTIVE"
+
+# Get summary of all workers
+for f in ~/.claude/orchestration/progress/*.json 2>/dev/null; do
+  [ -f "$f" ] || continue
+  AGENT_ID=$(basename "$f" .json)
+  echo "Worker: $AGENT_ID"
+  jq -r '"  Phase: \(.phase) | Step: \(.currentStep) | Progress: \(.progress * 100 | floor)%"' "$f" 2>/dev/null || echo "  [Error reading progress]"
+  echo ""
+done
+```
+
+### When to Check Progress
+
+| Scenario | Action |
+|----------|--------|
+| User asks "How's it going?" | Check all workers, give status update |
+| Before spawning dependent work | Verify dependencies are complete |
+| Long-running work (>2min) | Proactively check every 3-5 exchanges |
+| Synthesizing results | Check for completion signals |
+| Detecting stuck workers | Check if currentStep hasn't changed |
+
+### Progress-Based User Communication
+
+**Don't say:** "Agents are working..."
+**Do say:** "Making progress - implementation 60% done, validation queued"
+
+**Example:**
+
+```
+User: "What's the status?"
+
+You: [Run progress check via Bash]
+
+"Looking good! Here's where we are:
+
+✅ Pattern discovery - Complete
+   Found 3 reference implementations
+
+🔄 Implementation - 60% done
+   Iteration 4/7, tests passing
+
+⏳ Validation - Queued
+   Waiting on implementation to complete
+
+📝 Documentation - Just started
+   Writing examples"
+```
+
+### Cleanup Completed Workers
+
+After synthesizing results, archive completed workers:
+
+```bash
+# Move completed workers to archive
+for f in ~/.claude/orchestration/progress/*.json 2>/dev/null; do
+  [ -f "$f" ] || continue
+  STATUS=$(jq -r '.status' "$f" 2>/dev/null)
+  if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+    mkdir -p ~/.claude/orchestration/completed
+    mv "$f" ~/.claude/orchestration/completed/
+  fi
+done
+```
 
 ---
 
