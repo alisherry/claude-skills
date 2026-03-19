@@ -32,6 +32,12 @@ Monitor GitHub Actions CI for the current branch. Check every minute, flag failu
 
    ### CI Failures
    - If all jobs are passing or still in progress with no failures: report status briefly and wait for the next tick.
+   - **For composite workflows like "Rush Projects"**: The top-level run may show `in_progress` while sub-jobs have already failed. When a run contains sub-jobs, drill into them:
+     ```
+      gh run view <databaseId> --json jobs | jq '.jobs[] | select(.conclusion == "failure") | {name, conclusion}'
+     ```
+      This catches failures in sub-steps like Prettier, Lint, E2E tests, etc. that won't surface in the top-level `gh run list`.
+
    - If any job has `"conclusion": "failure"`:
      1. **Get the failure details**: `gh run view <databaseId> --log-failed 2>&1 | tail -80`
      2. **Extract an error signature**: A short, unique key from the error (e.g., `"TS2304:useEffect"`, `"jest:timeout:auth.spec"`, `"eslint:no-unused-vars:billing-guard"`). This is used to detect repeated failures.
