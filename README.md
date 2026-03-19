@@ -13,6 +13,15 @@ Transform Claude Code from a single-threaded assistant into a parallel orchestra
 - Pattern adherence workflow to match existing codebase conventions
 - Domain-specific guides for software development, code review, testing, and more
 
+### [Engineering Team](./engineering-team/)
+
+Spin up a 4-agent engineering team (architect, engineer, reviewer, CI monitor) that self-coordinates via tasks. Say "form voltron" and the team spawns idle — you give the task, and they handle the rest.
+
+- Architect plans, engineer implements in an isolated worktree, reviewer checks code, CI monitor babysits the pipeline
+- CI monitor escalates architectural decisions back to the architect instead of guessing
+- User approves the plan before implementation starts
+- Max 2 review cycles, then the PR is created and CI is monitored
+
 ### [CI Monitor](./ci-monitor/)
 
 Babysit GitHub Actions CI for your current branch. Automatically monitors CI runs, detects failures, fixes them, and pushes — all while tracking and addressing PR review comments.
@@ -32,9 +41,12 @@ cp ci-monitor/SKILL.md ~/.claude/commands/babysit-ci.md
 
 # Example: install the orchestration skill
 cp multi-agent-orchestration/SKILL.md ~/.claude/commands/orchestration.md
+
+# Example: install the engineering team skill
+cp engineering-team/SKILL.md ~/.claude/skills/form-voltron/SKILL.md
 ```
 
-Then invoke with `/babysit-ci` or `/orchestration` in Claude Code.
+Then invoke with `/babysit-ci`, `/orchestration`, or `/form-voltron` in Claude Code.
 
 ## License
 
