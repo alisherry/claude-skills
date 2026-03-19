@@ -23,7 +23,7 @@ Monitor GitHub Actions CI for the current branch. Check every minute, flag failu
 
 3. **Set up a recurring check every 1 minute** using CronCreate with this prompt:
    ```
-   Run the babysit-ci check: gh run list --branch <BRANCH> --limit 10 --json databaseId,status,conclusion,name | jq '[.[] | select(.status != "completed" or .conclusion == "failure")] | if length == 0 then "ALL PASSING" else . end'
+   Run the babysit-ci check: gh run list --branch <BRANCH> --json databaseId,status,conclusion,name | jq '[.[] | select(.status != "completed" or .conclusion == "failure")] | if length == 0 then "ALL PASSING" else . end'
    ```
 
 4. **Run the first check immediately** (don't wait for the cron).
