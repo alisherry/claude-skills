@@ -97,28 +97,25 @@ Then follow the babysit-ci workflow:
    - If any job has "conclusion": "failure":
      a. Get failure details: gh run view <databaseId> --log-failed 2>&1 | tail -80
      b. Analyze root cause (lint, type, test, build error)
-     c. If you can fix it (lint/format/simple type error): fix, commit, push.
-     d. If the fix requires architectural decisions or significant code changes: send the failure details to the architect via SendMessage and ask for guidance. Wait for the architect's response before proceeding.
-     e. If the same job fails twice after a fix attempt: escalate to team lead.
+     c. Send the failure details to the architect via SendMessage with your analysis of the root cause. The architect will scope the fix and route it to the engineer.
+     d. Wait for the fix to be pushed, then continue monitoring.
 
 3. Monitor PR review comments:
    - Maintain a log at .claude/babysit-ci-comments-<PR_NUMBER>.json
    - Fetch comments: gh api repos/{owner}/{repo}/pulls/{pr_number}/comments --jq '.[] | select(.in_reply_to_id == null) | {id, path, line, body, user: .user.login}'
-   - Skip already-addressed comments.
-   - For simple code fixes: make the fix, commit, push.
-   - For questions: reply with a brief answer.
-   - For comments that require design decisions or disagree with the approach: send to the architect via SendMessage for guidance.
-   - Skip purely informational bot comments.
+   - Skip already-addressed comments and purely informational bot comments.
+   - For all code change requests and questions: send to the architect via SendMessage with the comment details. The architect will scope the response and route to the engineer if needed.
+   - Log each comment as addressed once routed.
 
 4. When all CI checks pass and all comments are addressed:
    - Send team lead "CI GREEN — all checks passed, all comments addressed"
    - Cancel the cron job
 
 Rules:
+- You are a MONITOR, not a fixer. Never edit code or make commits yourself.
+- Route ALL failures and review comments to the architect.
 - Never use --no-verify or skip hooks.
 - Never force push.
-- Each fix gets its own commit.
-- Max 2 fix attempts per failing job before escalating to team lead.
 
 Mark task #4 as completed when done.
 ```
