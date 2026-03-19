@@ -15,27 +15,37 @@ Monitor GitHub Actions CI for the current branch. Check every minute, flag failu
    gh pr view --json number -q .number
    ```
 
-2. **Set up a recurring check every 1 minute** using CronCreate with this prompt:
+2. **Initialize the error log** at `.claude/babysit-ci-errors-<PR_NUMBER>.json`:
+   ```json
+   { "errors": [] }
+   ```
+   Each entry tracks: `{ "job": "job name", "error_signature": "short unique key from the error", "attempt": 1, "fix_description": "what was tried", "timestamp": "ISO8601", "commit": "sha" }`
+
+3. **Set up a recurring check every 1 minute** using CronCreate with this prompt:
    ```
    Run the babysit-ci check: gh run list --branch <BRANCH> --limit 10 --json databaseId,status,conclusion,name | jq '[.[] | select(.status != "completed" or .conclusion == "failure")] | if length == 0 then "ALL PASSING" else . end'
    ```
 
-3. **Run the first check immediately** (don't wait for the cron).
+4. **Run the first check immediately** (don't wait for the cron).
 
-4. **On each check:**
+5. **On each check:**
 
    ### CI Failures
    - If all jobs are passing or still in progress with no failures: report status briefly and wait for the next tick.
    - If any job has `"conclusion": "failure"`:
      1. **Get the failure details**: `gh run view <databaseId> --log-failed 2>&1 | tail -80`
-     2. **Analyze the failure**: Determine root cause (lint error, type error, test failure, build error, etc.)
-     3. **Make a concise plan**: State what needs to change and in which file(s). Keep it to 2-3 sentences max.
+     2. **Extract an error signature**: A short, unique key from the error (e.g., `"TS2304:useEffect"`, `"jest:timeout:auth.spec"`, `"eslint:no-unused-vars:billing-guard"`). This is used to detect repeated failures.
+     3. **Check the error log**: Look for previous entries with the same `error_signature`.
+        - **0 previous attempts**: Analyze, plan, fix, commit, push. Log the attempt.
+        - **1 previous attempt**: The first fix didn't work. Re-read the previous fix description, try a *different* approach. Log with `attempt: 2`.
+        - **2+ previous attempts**: STOP. Do not attempt another fix. Report to the user: "Failed to fix `{error_signature}` after {N} attempts. Previous fixes tried: {list}. Needs manual intervention."
      4. **Fix it**: Edit the necessary files. Run your project's lint/format command if it's a lint/format issue.
      5. **Commit and push**: Create a new commit with a descriptive message. Push to the same branch.
-     6. **Continue monitoring**: The cron will pick up the new CI run automatically.
+     6. **Log the attempt**: Add an entry to the error log with job name, error signature, attempt number, fix description, timestamp, and commit SHA.
+     7. **Continue monitoring**: The cron will pick up the new CI run automatically.
 
    ### PR Review Comments
-   - **Maintain a local log** at `.claude/babysit-ci-comments-<PR_NUMBER>.json` tracking addressed comments:
+   - **Maintain a comment log** at `.claude/babysit-ci-comments-<PR_NUMBER>.json` tracking addressed comments:
      ```json
      { "addressed": { "<comment_id>": { "timestamp": "ISO8601", "action": "fixed|replied|skipped" } } }
      ```
@@ -52,15 +62,16 @@ Monitor GitHub Actions CI for the current branch. Check every minute, flag failu
      5. **Skip bot comments** that are purely informational (e.g., deployment status, coverage reports).
      6. **Log the comment** as addressed with timestamp and action taken.
 
-5. **When all jobs show `"status": "completed"` with `"conclusion": "success"` and all comments are addressed:**
+6. **When all jobs show `"status": "completed"` with `"conclusion": "success"` and all comments are addressed:**
    - Report "All CI checks passing, all comments addressed" with a summary.
+   - Include a summary of the error log: how many errors were encountered, how many fixed, how many escalated.
    - Cancel the cron job using CronDelete.
 
 ## Rules
 - Never use `--no-verify` or skip hooks.
 - Never force push.
 - Each fix gets its own commit (don't amend).
+- **Never attempt the same fix twice.** The error log is the source of truth — always check it before fixing. If the same error signature reappears after a fix, the fix didn't work. Try something different or escalate.
 - If a failure is unclear or seems unrelated to our changes, flag it to the user before attempting a fix.
-- If the same job fails twice after a fix attempt, stop and ask the user for help.
 - If a review comment disagrees with the overall approach (not just a code tweak), flag it to the user rather than making sweeping changes.
 - Batch multiple comment fixes into a single commit when they're related.
